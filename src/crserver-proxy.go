@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 // CrsCall crs:call struct
@@ -49,6 +50,9 @@ func reportError(writer http.ResponseWriter, msg string) {
 }
 
 func handleRequest(writer http.ResponseWriter, incoming *http.Request) {
+
+	defer incoming.Body.Close()
+
 	// read request body
 	body, err := ioutil.ReadAll(incoming.Body)
 	if err != nil {
@@ -81,7 +85,9 @@ func handleRequest(writer http.ResponseWriter, incoming *http.Request) {
 	url.Path += incoming.RequestURI
 
 	// proxy request to crserver
-	client := http.Client{}
+	client := http.Client{
+		Timeout: time.Second * 1200,
+	}
 	req, _ := http.NewRequest("POST", url.String(), bytes.NewReader(body))
 	cloneHeaders(incoming.Header, req.Header)
 	resp, err := client.Do(req)
@@ -133,6 +139,12 @@ func main() {
 
 	// start webserver
 	fmt.Printf("Listening port %s (to change use LISTEN_PORT env var)\n", listenPort)
+	srv := &http.Server{
+		Addr:         ":" + listenPort,
+		ReadTimeout:  1200 * time.Second,
+		WriteTimeout: 1200 * time.Second,
+		IdleTimeout:  1200 * time.Second,
+	}
 	http.HandleFunc("/", handleRequest)
-	http.ListenAndServe(":"+listenPort, nil)
+	srv.ListenAndServe()
 }
