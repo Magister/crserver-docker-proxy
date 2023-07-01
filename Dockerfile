@@ -1,4 +1,4 @@
-FROM golang:1.15
+FROM golang:1.20
 
 ADD src/* /usr/src/crserver-proxy/
 
