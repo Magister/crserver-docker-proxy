@@ -4,8 +4,11 @@ go 1.20
 
 require github.com/docker/docker v24.0.2+incompatible
 
+require github.com/judwhite/go-svc v1.2.1
+
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
+	github.com/akamensky/argparse v1.4.0 // indirect
 	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect

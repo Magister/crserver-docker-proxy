@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
@@ -14,8 +15,18 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/akamensky/argparse"
+	"github.com/judwhite/go-svc"
 )
+
+// program implements svc.Service
+type program struct {
+	wg   sync.WaitGroup
+	quit chan struct{}
+}
 
 // CrsParams crs:params struct
 type CrsParams struct {
@@ -128,25 +139,98 @@ func handleRequest(writer http.ResponseWriter, incoming *http.Request) {
 
 func main() {
 
+	prg := &program{}
+
+	// Call svc.Run to start your program/service.
+	if err := svc.Run(prg); err != nil {
+		log.Fatal(err)
+	}
+
+}
+
+func (p *program) Init(env svc.Environment) error {
+	log.Printf("is win service? %v\n", env.IsWindowsService())
+	return nil
+}
+
+func (p *program) Stop() error {
+	// The Stop method is invoked by stopping the Windows service, or by pressing Ctrl+C on the console.
+	// This method may block, but it's a good idea to finish quickly or your process may be killed by
+	// Windows during a shutdown/reboot. As a general rule you shouldn't rely on graceful shutdown.
+
+	log.Println("Stopping...")
+	close(p.quit)
+	p.wg.Wait()
+	log.Println("Stopped.")
+	return nil
+}
+
+func (p *program) Start() error {
+	// The Start method must not block, or Windows may assume your service failed
+	// to start. Launch a Goroutine here to do something interesting/blocking.
+
+	p.quit = make(chan struct{})
+
+	p.wg.Add(1)
+
+	var repoURLStringArg *string
+	var listenPortArg *string
+	var commitRegexpStrArg *string
+
+	parser := argparse.NewParser("crserver-proxy", "1C config repo proxy")
+	repoURLStringArg = parser.String("u", "repo-url", &argparse.Options{
+		Required: false,
+		Help:     "Configuration Repository URL",
+	})
+	listenPortArg = parser.String("p", "port", &argparse.Options{
+		Required: false,
+		Help:     "Listen port",
+	})
+	commitRegexpStrArg = parser.String("r", "commit-regexp", &argparse.Options{
+		Required: false,
+		Help:     "RegExp to validate commit messages",
+	})
+	args_err := parser.Parse(os.Args)
+	if args_err != nil {
+		// In case of error print error and print usage
+		// This can also be done by passing -h or --help flags
+		fmt.Print(parser.Usage(args_err))
+		os.Exit(1)
+	}
+
+	// collect parsed args
+	var ok bool
+	repoURLString := *repoURLStringArg
+	listenPort := *listenPortArg
+	commitRegexpStr := *commitRegexpStrArg
+
+	// for not specified args, use env
 	// get repo url
-	repoURLString := os.Getenv("REPO_URL")
 	if repoURLString == "" {
-		log.Panicln("Please set REPO_URL environment variable to Configuration Repository URL")
+		repoURLString = os.Getenv("REPO_URL")
+		if repoURLString == "" {
+			log.Panicln("Please set REPO_URL environment variable to Configuration Repository URL")
+		}
 	}
 
 	// get listen port
-	listenPort, ok := os.LookupEnv("LISTEN_PORT")
-	if !ok {
-		listenPort = "8080"
+	if listenPort == "" {
+		listenPort, ok = os.LookupEnv("LISTEN_PORT")
+		if !ok {
+			listenPort = "8080"
+		}
 	}
 
 	// init commit msg regexp
-	commitRegexpStr, ok := os.LookupEnv("COMMIT_REGEXP")
-	if !ok {
-		commitRegexpStr = `.*`
-		log.Println(fmt.Sprintf("COMMIT_REGEXP env var not specified, using default %[1]s", commitRegexpStr))
+	if commitRegexpStr == "" {
+		commitRegexpStr, ok = os.LookupEnv("COMMIT_REGEXP")
+		if !ok {
+			commitRegexpStr = `.*`
+			fmt.Printf("COMMIT_REGEXP env var not specified, using default %[1]s\n", commitRegexpStr)
+		}
 	}
 	commitCommentRegexp = regexp.MustCompile(`(?i)` + commitRegexpStr)
+	fmt.Printf("Using comit regexp %[1]s\n", commitCommentRegexp.String())
 
 	// parse url
 	var err error
@@ -184,5 +268,14 @@ func main() {
 		IdleTimeout:  1200 * time.Second,
 	}
 	http.HandleFunc("/", handleRequest)
-	srv.ListenAndServe()
+	go func() {
+		log.Println("Starting...")
+		go srv.ListenAndServe()
+		<-p.quit
+		log.Println("Quit signal received...")
+		srv.Shutdown(context.Background())
+		p.wg.Done()
+	}()
+
+	return nil
 }
