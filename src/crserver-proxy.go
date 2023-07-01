@@ -12,20 +12,29 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
 
+// CrsParams crs:params struct
+type CrsParams struct {
+	Comment string `xml:"comment"`
+	Request string `xml:"request"`
+}
+
 // CrsCall crs:call struct
 type CrsCall struct {
-	XMLName xml.Name `xml:"call"`
-	Alias   string   `xml:"alias,attr"`
-	Name    string   `xml:"name,attr"`
-	Version string   `xml:"version,attr"`
+	XMLName xml.Name  `xml:"call"`
+	Alias   string    `xml:"alias,attr"`
+	Name    string    `xml:"name,attr"`
+	Version string    `xml:"version,attr"`
+	Params  CrsParams `xml:"params"`
 }
 
 var repoURL *url.URL
 var repoIPByVersion = make(map[string]string)
+var commitCommentRegexp *regexp.Regexp
 
 func cloneHeaders(src, dst http.Header) {
 	for name, values := range src {
@@ -73,15 +82,29 @@ func handleRequest(writer http.ResponseWriter, incoming *http.Request) {
 		return
 	}
 
+	if parsed.Name == "DevDepot_enrollDevObjects" {
+		comment := strings.TrimSpace(parsed.Params.Comment)
+		if !commitCommentRegexp.MatchString(comment) {
+			reportError(writer, fmt.Sprintf(`Commit message %[1]s does not conform to regexp %[2]s.`, comment, commitCommentRegexp.String()))
+			return
+		}
+	}
+
 	// build crserver URL
 	var url = *repoURL
 	destIP := ""
 	ok := false
 	if destIP, ok = repoIPByVersion[parsed.Version]; !ok {
-		reportError(writer, fmt.Sprintf(`There is no %[1]s version of repository server installed on the server.`, parsed.Version))
-		return
+		if destIP, ok = repoIPByVersion["*"]; !ok {
+			reportError(writer, fmt.Sprintf(`There is no %[1]s version of repository server installed on the server.`, parsed.Version))
+			return
+		}
 	}
-	url.Host = net.JoinHostPort(destIP, "80")
+	if _, _, ok := net.SplitHostPort(destIP); ok == nil {
+		url.Host = destIP
+	} else {
+		url.Host = net.JoinHostPort(destIP, "80")
+	}
 	url.Path += incoming.RequestURI
 
 	// proxy request to crserver
@@ -117,14 +140,29 @@ func main() {
 		listenPort = "8080"
 	}
 
-	// connect to Docker
-	repoPortsChan := DockerConnect()
+	// init commit msg regexp
+	commitRegexpStr, ok := os.LookupEnv("COMMIT_REGEXP")
+	if !ok {
+		commitRegexpStr = `.*`
+		log.Println(fmt.Sprintf("COMMIT_REGEXP env var not specified, using default %[1]s", commitRegexpStr))
+	}
+	commitCommentRegexp = regexp.MustCompile(`(?i)` + commitRegexpStr)
 
 	// parse url
 	var err error
 	repoURL, err = url.Parse(repoURLString)
 	if err != nil {
 		log.Panicln(err.Error())
+	}
+
+	// connect to Docker if configured
+	var repoPortsChan <-chan map[string]string
+	dockerHost, ok := os.LookupEnv("DOCKER_HOST")
+	if !ok || len(strings.TrimSpace(dockerHost)) == 0 {
+		repoIPByVersion = make(map[string]string)
+		repoIPByVersion["*"] = repoURL.Host
+	} else {
+		repoPortsChan = DockerConnect()
 	}
 
 	// update config on channel
